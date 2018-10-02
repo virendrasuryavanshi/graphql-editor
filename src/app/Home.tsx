@@ -8,8 +8,6 @@ import {
   Item
 } from '@slothking-online/diagram';
 import { categories, singlePortOutput } from '../categories';
-import { xonokai } from 'react-syntax-highlighter/styles/prism';
-import SyntaxHighlighter from 'react-syntax-highlighter/prism';
 import * as styles from '../style/Home';
 import {
   typeTemplate,
@@ -19,14 +17,15 @@ import {
   queryTemplate,
   rootQueryTemplate,
   rootMutationTemplate,
-  TemplateProps
+  TemplateProps,
+  rootSubscriptionTemplate
 } from '../livegen/gens/graphql/template';
 import { nodeTypes, SubTypes } from '../nodeTypes';
-import { GraphQLNodeType, TransformedInput } from '../livegen/gens';
-import * as cx from 'classnames';
+import { GraphQLNodeType } from '../livegen/gens';
 import { crudMacroTemplate } from '../livegen/gens/graphql/macros/crud';
 import { generateFakerResolver } from '../livegen/gens/faker';
-import { getDefinitionInputs } from '../livegen/gens/utils';
+import { getDefinitionInputs, getDefinitionOutputs } from '../livegen/gens/utils';
+import { CodeEditor } from './Code';
 
 export type ModelState = {
   nodes: Array<NodeType>;
@@ -35,51 +34,63 @@ export type ModelState = {
   loaded?: LoadedFile;
   projectId?: string;
   liveCode: string;
-  editor?: boolean;
 };
 
 class Home extends React.Component<{}, ModelState> {
   state: ModelState = {
     nodes: [],
     links: [],
-    loaded: null,
+    loaded: {
+      nodes: [],
+      links: [],
+      tabs: []
+    },
     projectId: null,
     liveCode: ''
   };
   componentDidMount() {}
   render() {
-    const addType = (nodes: NodeType[], type: keyof typeof nodeTypes): Item[] =>
-      nodes
-        .filter((n: NodeType) => n.type === type && n.subType === SubTypes.definition)
-        .map((n: NodeType) => ({
-          name: n.name,
-          node: {
-            name: n.name,
-            type,
-            subType: SubTypes.clone,
-            kind: n.name,
-            clone: n.id,
-            outputs: singlePortOutput,
-            inputs: [
+    const filterDefinitions = (nodes: NodeType[], type: keyof typeof nodeTypes) =>
+      nodes.filter((n: NodeType) => n.type === type && n.subType === SubTypes.definition);
+    const mapToNode = (type: keyof typeof nodeTypes) => (n: NodeType) => ({
+      name: n.name,
+      node: {
+        name: n.name,
+        type,
+        subType: SubTypes.clone,
+        kind: n.name,
+        clone: n.id,
+        outputs: singlePortOutput,
+        inputs: [
+          {
+            name: '',
+            accepted: [
               {
-                name: '',
-                accepted: [
-                  {
-                    node: {
-                      subType: SubTypes.field
-                    }
-                  },
-                  {
-                    node: {
-                      subType: SubTypes.clone
-                    }
-                  }
-                ]
+                node: {
+                  subType: SubTypes.field
+                }
+              },
+              {
+                node: {
+                  subType: SubTypes.definition,
+                  type: nodeTypes.query
+                }
+              },
+              {
+                node: {
+                  subType: SubTypes.clone
+                }
               }
-            ],
-            editable: true
+            ]
           }
-        }));
+        ],
+        editable: true
+      }
+    });
+    const addType = (nodes: NodeType[], type: keyof typeof nodeTypes): Item[] =>
+      filterDefinitions(nodes, type).map(mapToNode(type));
+    const addImplements = (nodes: NodeType[]): Item[] =>
+      filterDefinitions(nodes, nodeTypes.interface).map(mapToNode(nodeTypes.implements));
     const allCategories: ActionCategory[] = [
       ...categories.map(
         (c) =>
@@ -95,6 +106,10 @@ class Home extends React.Component<{}, ModelState> {
                     {
                       name: nodeTypes.interface,
                       items: addType(this.state.nodes, nodeTypes.interface)
+                    },
+                    {
+                      name: nodeTypes.implements,
+                      items: addImplements(this.state.nodes)
                     },
                     {
                       name: nodeTypes.input,
@@ -113,46 +128,51 @@ class Home extends React.Component<{}, ModelState> {
     ];
     return (
       <div className={styles.Full}>
-        <div
-          className={cx({
-            [styles.HideEditor]: this.state.editor,
-            [styles.ShowEditor]: !this.state.editor,
-            [styles.Editor]: true
-          })}
-        >
-          <SyntaxHighlighter
-            PreTag={({ children }) => <div className={styles.Pre}>{children}</div>}
-            language="graphql"
-            style={xonokai}
-          >
-            {this.state.liveCode}
-          </SyntaxHighlighter>
-          <div
-            className={styles.ClickInfo}
-            onClick={() => {
-              this.setState({
-                editor: !this.state.editor
-              });
-            }}
-          >{this.state.editor ? `>>` : `<<`}</div>
-        </div>
+        <CodeEditor
+          liveCode={this.state.liveCode}
+          loadNodes={(props) => {
+            this.setState({
+              loaded: {
+                ...this.state.loaded,
+                ...props
+              }
+            });
+          }}
+        />
         <Graph
           categories={allCategories}
           loaded={this.state.loaded}
           serialize={(node, links, tabs) => {
             let nodes = node as GraphQLNodeType[];
             nodes = [...nodes];
-            const crudMacroNodes = crudMacroTemplate(nodes, links);
-            const nodeInputs: {
-              node: GraphQLNodeType;
-              inputs: TransformedInput[];
-            }[] = nodes
+            let nodeInputs: TemplateProps[] = nodes
               .filter((n) => n.subType === SubTypes.definition)
               .map((n) => ({
                 node: n,
-                inputs: getDefinitionInputs(links, nodes, n)
-              }))
-              .concat(crudMacroNodes.reduce((a, b) => [...a, ...b], []));
+                inputs: getDefinitionInputs(links, nodes, n),
+                outputs: getDefinitionOutputs(links, nodes, n)
+              }));
+            nodeInputs = nodeInputs.map(
+              (n) =>
+                n.node.type === nodeTypes.type
+                  ? {
+                      ...n,
+                      inputs: [
+                        ...n.inputs,
+                        ...n.inputs
+                          .filter((ni) => ni.type === nodeTypes.implements)
+                          .map(
+                            (interfaceTypeInput) =>
+                              nodeInputs.find((ni) => ni.node.id === interfaceTypeInput.clone)
+                                .inputs
+                          )
+                          .reduce((a, b) => [...a, ...b], [])
+                      ]
+                    }
+                  : n
+            );
+            const crudMacroNodes = crudMacroTemplate(nodes, links, nodeInputs);
+            nodeInputs = [...nodeInputs, ...crudMacroNodes];
             const generator = (
               type: keyof typeof nodeTypes,
               template: (props: TemplateProps) => string
@@ -169,10 +189,15 @@ class Home extends React.Component<{}, ModelState> {
             const mutationsCode = rootMutationTemplate(
               generator(nodeTypes.mutation, queryTemplate)
             );
-            generateFakerResolver(nodes, links);
+            const subscriptionsCode = rootSubscriptionTemplate(
+              generator(nodeTypes.subscription, queryTemplate)
+            );
+            const resolverCode = nodeInputs.map(generateFakerResolver).join('\n');
+            resolverCode;
             const mainCode = `schema{
   query: Query,
-  mutation: Mutation
+  mutation: Mutation,
+  subscription: Subscription
 }`;
             const liveCode = [
               enumsCode,
@@ -181,6 +206,7 @@ class Home extends React.Component<{}, ModelState> {
               typesCode,
               queriesCode,
               mutationsCode,
+              subscriptionsCode,
               mainCode
             ].join('\n');
             this.setState({
